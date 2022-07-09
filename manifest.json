@@ -1,6 +1,7 @@
 {
   "name": "Time aware Tab Manager",
-  "version": "1.0",
+  "version": "0.0.0",
+  "author": "Junwha Hong",
   "manifest_version": 3,
   "permissions": [
     "alarms",
