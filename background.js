@@ -1,6 +1,6 @@
 'use strict';
 
-const DEBUG = true;
+const DEBUG = false;
 const MIN_TO_MS = DEBUG ? 1000 : 60 * 1000;
 const TIMEOUT = 100;
 const MAX_TRIAL = 5;
