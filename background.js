@@ -5,7 +5,7 @@ const MIN_TO_MS = DEBUG ? 1000 : 60 * 1000;
 const TIMEOUT = 100;
 const MAX_TRIAL = 5;
 const ALARM_INTERVAL = 1;
-const THRESHOLD = [15, 60];
+const INIT_THRESHOLD = [15, 60];
 const SKIP_THRESHOLD = 2000;
 
 const TAB_LIST_KEY = "__tab_list";
@@ -24,14 +24,17 @@ function initExtension() {
         for (var tab of tabs) {
             tabInfoList.push(initTabEntry(tab.id));
         }
-        StorageManager.setTabInfoList(tabInfoList, ()=>{ console.log("[DEBUG] Initialized"); TabManager.regroup()});
+        StorageManager.setTabInfoListAndThresholds(tabInfoList, INIT_THRESHOLD, ()=>{
+                console.log("[DEBUG] Initialized"); 
+                TabManager.regroup();
+        });
     });
 }
 
 // Return two tab lists satisfying thresholds
 function getTabListsByTime(callback) {
     chrome.tabs.query({}, (tabs) => {
-        StorageManager.getTabInfoList((tabInfoList)=>{
+        StorageManager.getTabInfoListAndThresholds((tabInfoList, THRESHOLD)=>{
             console.log(tabInfoList);
             let firstStage = [];
             let secondStage = [];
@@ -68,6 +71,12 @@ class StorageManager
         });
     }
     
+    static _callbackGetTwoKey(keys, callback){
+        chrome.storage.local.get(keys, (item) => {
+            callback(item[keys[0]], item[keys[1]]);
+        });
+    }
+
     static _callbackSet(pair, callback){
         chrome.storage.local.set(pair, callback);
     }
@@ -78,6 +87,22 @@ class StorageManager
 
     static setTabInfoList(tabInfoList, callback=()=>{}){
         this._callbackSet({"__tab_list": tabInfoList}, callback);
+    }
+
+    static getThresholds(callback){
+        this._callbackGet("__tab_thresholds", callback);
+    }
+
+    static setThresholds(thresholds, callback=()=>{}){
+        this._callbackSet({"__tab_thresholds": thresholds}, callback);
+    }
+
+    static setTabInfoListAndThresholds(tabInfoList, thresholds, callback=()=>{}){
+        this._callbackSet({"__tab_list": tabInfoList, "__tab_thresholds": thresholds}, callback);
+    }
+
+    static getTabInfoListAndThresholds(callback){
+        this._callbackGetTwoKey(["__tab_list", "__tab_thresholds"], callback);
     }
 }
 
@@ -157,23 +182,25 @@ class TabManager {
         console.log("[DEBUG] regroup");
         getTabListsByTime((firstStage, secondStage)=>{            
             chrome.tabs.query({}, (tabs) => {
-                var tabIdList = [];
-                for (var tab of tabs){
-                    if (tab.groupId > 0)
-                       tabIdList.push(tab.id);               
-                }
+                StorageManager.getThresholds((THRESHOLD)=>{
+                    var tabIdList = [];
+                    for (var tab of tabs){
+                        if (tab.groupId > 0)
+                        tabIdList.push(tab.id);               
+                    }
 
-                if (tabIdList.length != 0){
-                    ChromeTabAPIWrapper.ungroup(tabIdList, ()=>{
+                    if (tabIdList.length != 0){
+                        ChromeTabAPIWrapper.ungroup(tabIdList, ()=>{
+                            this.groupTabs(firstStage, THRESHOLD[0]);
+                            this.groupTabs(secondStage, THRESHOLD[1]);
+                        });
+                    } else {
                         this.groupTabs(firstStage, THRESHOLD[0]);
                         this.groupTabs(secondStage, THRESHOLD[1]);
-                    });
-                } else {
-                    this.groupTabs(firstStage, THRESHOLD[0]);
-                    this.groupTabs(secondStage, THRESHOLD[1]);
-                }
-            })
-        })
+                    }
+                });
+            });
+        });
     }
 }
 
@@ -200,27 +227,29 @@ class ChromeTabAPIWrapper{
         try {
             if (trial <= MAX_TRIAL) {
                 chrome.tabs.group({ createProperties: { windowId: windowId }, tabIds: tabIdList }).catch((e) => setTimeout(() => this.group(tabIdList, elapsedTime, windowId, trial + 1), TIMEOUT)).then((gid) => {
-                    if (gid === -1)
-                        return;
+                    StorageManager.getThresholds((THRESHOLD) => {
+                        if (gid === -1)
+                            return;
 
-                    var _color, _timeInfo;
+                        var _color, _timeInfo;
 
-                    if (parseInt(elapsedTime) >= parseInt(THRESHOLD[1])) {
-                        _timeInfo = THRESHOLD[1] < 60 ? `${THRESHOLD[1]}m` : `${parseInt(THRESHOLD[1] / 60)}h`;
-                        _color = "red";
-                    } else if (parseInt(elapsedTime) >= parseInt(THRESHOLD[0])) {
-                        _timeInfo = THRESHOLD[0] < 60 ? `${THRESHOLD[0]}m` : `${parseInt(THRESHOLD[0] / 60)}h`;
-                        _color = "yellow";
-                    } else {
-                        return;
-                    }
-                    
-                    var p = chrome.tabGroups.update(gid, {
-                        color: _color,
-                        title: _timeInfo
+                        if (parseInt(elapsedTime) >= parseInt(THRESHOLD[1])) {
+                            _timeInfo = THRESHOLD[1] < 60 ? `${THRESHOLD[1]}m` : `${parseInt(THRESHOLD[1] / 60)}h`;
+                            _color = "red";
+                        } else if (parseInt(elapsedTime) >= parseInt(THRESHOLD[0])) {
+                            _timeInfo = THRESHOLD[0] < 60 ? `${THRESHOLD[0]}m` : `${parseInt(THRESHOLD[0] / 60)}h`;
+                            _color = "yellow";
+                        } else {
+                            return;
+                        }
+                        
+                        var p = chrome.tabGroups.update(gid, {
+                            color: _color,
+                            title: _timeInfo
+                        });
+
+                        p.catch((e) => console.log("[Exception] no group: " + gid));
                     });
-
-                    p.catch((e) => console.log("[Exception] no group: " + gid));
                 });
             }
         } catch {
@@ -292,10 +321,9 @@ function onPopupMessageReceived (request, sender, sendResponse) {
             }
         );
     } else if (request.type == 1) { // Update thresholds
-        // console.log(request);
-        // withGlobal((global) => {
-        //     global.setTHRESHOLD([request.thresholds[0], request.thresholds[1]]);
-        // });
+        StorageManager.setThresholds([request.thresholds[0], request.thresholds[1]], ()=>{
+            TabManager.regroup();
+        });
     } else if (request.type == 2) {
         sendFavIcons(sendResponse);
         return true;
